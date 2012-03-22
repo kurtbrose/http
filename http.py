@@ -1,14 +1,3 @@
-#is it too labor intensive to create a Request and a Connection?
-#http.post, http.get? -- no, that is the job of higher level library
-#but, still can think of making it easy to implement
-
-#if post and get are available, what of the Request and Response objects?
-#the arguments could be so variable...
-
-#who is responsible for constructing the Request and Response object?
-#Connection should take a request and return a response
-
-
 #example usage of the library:
 def get(url, conn=None):
     if conn is None:
@@ -59,9 +48,10 @@ class Connection(object):
         self.busy = False
         return resp
 
-#is the job of a Request to "translate" the python data types to the bytes of
-#an http request? this seems reasonable; in that case, should Response objects
-#be parsers?
+_DEFAULT_HEADERS = {
+    "Accept-Encoding" : "identity",
+    "User-Agent" : "Python HTTP"
+}
 
 class Request(object):
     def __init__(self, url, method, headers=None, data=None):
@@ -74,26 +64,57 @@ class Request(object):
         '''
         Return the bytes to be sent out on the wire
         '''
-        pass
+        for k in _DEFAULT_HEADERS:
+            self.headers.setdefault(k, _DEFAULT_HEADERS[k])
+        
+        self.bytes = "".join([ 
+            self.method+" "+url+" HTTP/1.1\r\n",
+            "\r\n".join(k+": "+v for k,v in self.headers.items),
+            "\r\n",
+            self.data #body of request
+            ])
         
 
-#a response can be a re-direct;
-#what if the response is currently blocked and needs to be called again to
-#continue?
-#is that the job of this library to provide a continuation method?
-#or, is that the job of lower level libraries?
-#is this object just a dumb data-holder?
-#should there be a separate parser object?
-#should HTTP errors be raised as exceptions? or, is that just the data of the response?
 class Response(object):
     def __init__(self):
         self.code = -1
         self.message = None
         self.headers = {}
         self.body = ""
+        self.state = "new"
+        self._unparsed = [] #data which cannot yet be parsed (e.g. incomplete header)
+        self._body_length = 0
     
     def parse(self, data):
-        pass
+        if self.state == "new": #step 1-- parse the http line
+            status, sep, rest = data.partition("\r\n")
+            if sep == '':
+                self._unparsed.append(data)
+                return
+            else:
+                data = rest
+                status_line = "".join(self._unparsed) + status
+                self._unparsed = []
+                version, self.code, self.message = status_line.split()
+                self.state = "headers"
+        if self.state == "headers":
+            headers, sep, body = data.partition("\r\n\r\n")
+            if sep != '':
+                self.state = "body"
+                data = body
+            headers = headers.split("\r\n") #TODO: what if last header is incomplete?
+            if body == "" and headers[-1] != "": #last header was not complete
+                self._unparsed.append(headers[-1])
+            if self._unparsed:
+                headers[0] = "".join(self.unparsed) + headers[0]
+                self._unparsed = []
+            for header in headers:
+                name, _, value = header.partition(": ")
+                self.headers[name] = value
+        if self.state == "body":
+            #first, append everything to _unparsed, then when the body is
+            #complete, join all the stuff in _unparsed together
+            self.body = data #TODO: length of body
     
     def needs_bytes(self):
         return self.state == "done"
