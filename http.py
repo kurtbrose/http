@@ -53,6 +53,7 @@ _DEFAULT_HEADERS = {
     "User-Agent" : "Python HTTP"
 }
 
+#TODO: should request data potentially be chunked if it is large?
 class Request(object):
     def __init__(self, url, method, headers=None, data=None):
         self.url = url
@@ -66,6 +67,7 @@ class Request(object):
         '''
         for k in _DEFAULT_HEADERS:
             self.headers.setdefault(k, _DEFAULT_HEADERS[k])
+        self.headers["Content-Length"] = str(len(data))
         
         self.bytes = "".join([ 
             self.method+" "+url+" HTTP/1.1\r\n",
@@ -83,7 +85,7 @@ class Response(object):
         self.body = ""
         self.state = "new"
         self._unparsed = [] #data which cannot yet be parsed (e.g. incomplete header)
-        self._body_length = 0
+        self._body_length = None
     
     def parse(self, data):
         if self.state == "new": #step 1-- parse the http line
@@ -112,9 +114,23 @@ class Response(object):
                 name, _, value = header.partition(": ")
                 self.headers[name] = value
         if self.state == "body":
-            #first, append everything to _unparsed, then when the body is
-            #complete, join all the stuff in _unparsed together
-            self.body = data #TODO: length of body
+            if self._body_length is None:
+                #determine the length per HTTP/1.1 section 4.4
+                #http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.4
+                if "Transfer-Encoding" in self.headers and \
+                        self.headers["Transfer-Encoding"] != "identity":
+                    pass #chunked transfer
+                elif "Content-Length" in self.headers:
+                    self._body_length = int(self.headers["Content-Length"])
+            self._unparsed.append(data)
+            if self._body_length <= sum([len(u) for u in self._unparsed]):
+                self.body = "".join(self._unparsed)
+                self._unparsed = []
+                state = "done"
+                #TODO: handle extra data better (maybe stop parsing?)
+                if len(body) > self._body_length:
+                    self.body = self.body[:self._body_length]
+                    raise ValueError("extra data")
     
     def needs_bytes(self):
         return self.state == "done"
