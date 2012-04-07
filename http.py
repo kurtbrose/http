@@ -1,25 +1,35 @@
-#example usage of the library:
-def get(url, conn=None):
-    if conn is None:
-        if url.startswith("https"):
-            conn = Connection(ssl.wrap_socket(socket.socket()))
-        else:
-            conn = Connection()
-    return conn.do(Request(url, "GET"))
-
-def post(url, data, conn=None):
-    if conn is None:
-        conn = Connection()
-    return conn.do(Request(url, "POST", data))
-
 #THE CODE ITESELF:
 import socket
 
+#Connection must be host-aware: connection may be re-used on a host-by-host basis
+
+#so.... you can't just pass any request to any connection, but only if the socket
+#of the connection is pointed at the correct host
+
+#so... the concept of a pool and of a connection are really inextricably bound
+#together
+
+def get_connection(request):
+    pass
+
+def connect(request):
+    pass
+
+class Connection(object):
+    def __init__(self, host):
+        pass
+
 #could connection punt on HTTPS somehow?
 class Connection(object):
-    def __init__(self, socket=None, ):
-        if socket is None:
-            socket = socket.socket() #TODO: parameters
+    def __init__(self, sock=None, ):
+        if sock is None:
+            self.socket = socket.socket() #AF_INET, SOCK_STREAM, protocol 0
+        else:
+            self.socket = sock
+        self.busy = False
+        self._connected = False
+        self._send_data = None
+        self._response = None
         self.busy = False
     
     #easier to ask forgiveness than permission -- this funciton is designed to
@@ -28,6 +38,9 @@ class Connection(object):
     #NOTE: do ssl.SSLSocket handle non-blocking okay?
     def do(self, request):
         self.busy = True
+        
+        if not self._connected:
+            self.socket.connect( (request.host, 80) )
         
         if self._send_data is None:
             self._send_data = request.compose()
@@ -40,12 +53,14 @@ class Connection(object):
             self._response = Response()
         
         while self._response.needs_bytes():
-            self._response.parse(self.socket.recv())
+            self._response.parse(self.socket.recv(4096))
         
         resp = self._response
         self._send_data = None
         self._response = None
         self.busy = False
+        self.socket.close()
+        self._connected = False
         return resp
 
 _DEFAULT_HEADERS = {
@@ -55,11 +70,13 @@ _DEFAULT_HEADERS = {
 
 #TODO: should request data potentially be chunked if it is large?
 class Request(object):
-    def __init__(self, url, method, headers=None, data=None):
-        self.url = url
+    def __init__(self, method, url, headers=None, data=None):
         self.method = method
-        self.headers = headers
-        self.data = data
+        url = url.replace("http://", "").replace("https://", "")
+        self.host, _, self.path = url.partition("/")
+        self.path = "/" + self.path
+        self.headers = headers if headers is not None else {}
+        self.data    = data    if data    is not None else ""
     
     def compose(self):
         '''
@@ -67,15 +84,15 @@ class Request(object):
         '''
         for k in _DEFAULT_HEADERS:
             self.headers.setdefault(k, _DEFAULT_HEADERS[k])
-        self.headers["Content-Length"] = str(len(data))
+        self.headers["Content-Length"] = str(len(self.data))
+        self.headers["Host"] = self.host
         
-        self.bytes = "".join([ 
-            self.method+" "+url+" HTTP/1.1\r\n",
-            "\r\n".join(k+": "+v for k,v in self.headers.items),
-            "\r\n",
+        return "".join([ 
+            self.method+" "+self.path+" HTTP/1.1\r\n",
+            "\r\n".join(k+": "+v for k,v in self.headers.items()),
+            "\r\n\r\n",
             self.data #body of request
             ])
-        
 
 class Response(object):
     def __init__(self):
@@ -92,12 +109,11 @@ class Response(object):
             status, sep, rest = data.partition("\r\n")
             if sep == '':
                 self._unparsed.append(data)
-                return
             else:
                 data = rest
                 status_line = "".join(self._unparsed) + status
                 self._unparsed = []
-                version, self.code, self.message = status_line.split()
+                version, self.code, self.message = status_line.split(" ", 2)
                 self.state = "headers"
         if self.state == "headers":
             headers, sep, body = data.partition("\r\n\r\n")
@@ -126,14 +142,13 @@ class Response(object):
             if self._body_length <= sum([len(u) for u in self._unparsed]):
                 self.body = "".join(self._unparsed)
                 self._unparsed = []
-                state = "done"
-                #TODO: handle extra data better (maybe stop parsing?)
-                if len(body) > self._body_length:
-                    self.body = self.body[:self._body_length]
-                    raise ValueError("extra data")
+                self.state = "done"
+                #return any excess data
+                self.body, extra = self.body[:self._body_length], self.body[self._body_length:]
+                return extra
     
     def needs_bytes(self):
-        return self.state == "done"
+        return self.state != "done"
 
 
 
